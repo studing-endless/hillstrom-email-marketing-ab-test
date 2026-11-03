@@ -1,0 +1,8 @@
+*.csv
+*.docx
+analysis.original.py
+.word-review.txt
+.run.txt
+.deps/
+.venv/
+__pycache__/

@@ -29,11 +29,23 @@
 
 ## 复现
 
-使用 Python、pandas、NumPy、SciPy 和 statsmodels。按[数据获取说明](data/README.md)保存 CSV 到 data/hillstrom.csv。
+已在 Windows PowerShell、稳定版 Python 3.13.6 的隔离环境完成验证，核心依赖为 NumPy 2.2.6、pandas 2.2.3、SciPy 1.15.3、statsmodels 0.14.4。按[数据获取说明](data/README.md)保存 CSV 到 data/hillstrom.csv。
 
 ```sh
+python -m venv .venv
+# Windows 使用 .venv/Scripts/python，macOS/Linux 使用 .venv/bin/python
+# 或先按本机 shell 的方式激活虚拟环境，再运行下列命令
 python -m pip install -r requirements.txt
 python -X utf8 analysis.py
+python -m pytest -q
 ```
 
 也可将原始 CSV 路径作为脚本的第一个参数。analysis.py 包含五阶段与第 5.5 节，docs/ 保存报告、方法、字典和运行记录，data/ 保存下载指引。
+
+## 质量检查与测试导航
+
+[分析代码](analysis.py) 包含输入校验、1:1:1 SRM、原主分析和单元格内 Bootstrap 敏感性。[测试](tests/test_analysis.py) 使用合成数据覆盖指标、区间、Holm、SRM、标签、策略选择与多群体评价、随机种子和异常报错。本地原始 CSV 存在时另执行全量集成复现；缺少 CSV 时该项明确跳过。CI 使用合成测试，不能替代原始数据的集成验证。
+
+[统计质量与敏感性审查](docs/statistical-quality.md) 列出消费分布和五项分层效果差区间。[验证记录](docs/verification.md) 保留历史与本次环境、命令和回归比较。跨平台命令以所选稳定 Python 已安装为前提，本次实际执行环境是 Windows。
+
+主要限制包括历史人群和两周结果的可迁移性、假设成本与毛益、先看全量再拆分的探索性质，以及个别单元格少量非零消费。新增区间为单项敏感性结果，项目全部探索尚未统一控制错误率。

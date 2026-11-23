@@ -6,3 +6,6 @@ analysis.original.py
 .deps/
 .venv/
 __pycache__/
+.local-audit/
+.pytest_cache/
+.vscode/

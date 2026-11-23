@@ -1,733 +1,316 @@
+"""Hillstrom 五阶段随机实验。导入模块不会读取数据或执行分析。"""
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import statsmodels.formula.api as smf
-from scipy.stats import t, ttest_ind
+from scipy.stats import chisquare, t, ttest_ind
 from statsmodels.stats.multitest import multipletests
 from statsmodels.stats.proportion import confint_proportions_2indep, proportions_ztest
 
+ARMS = ("Mens E-Mail", "Womens E-Mail", "No E-Mail")
+PAIRS = ((ARMS[0], ARMS[2]), (ARMS[1], ARMS[2]), (ARMS[0], ARMS[1]))
+FIELDS = ("recency", "history_segment", "history", "mens", "womens", "zip_code",
+          "newbie", "channel", "segment", "visit", "conversion", "spend")
+
+
+def purchase_groups(df):
+    mapping = {(1, 0): "仅买过男装", (0, 1): "仅买过女装", (1, 1): "两类都买过"}
+    labels = pd.Series([mapping.get(pair) for pair in zip(df["mens"], df["womens"])],
+                       index=df.index, name="purchase_group")
+    if labels.isna().any():
+        raise ValueError("历史购买品类存在未覆盖的组合")
+    return labels
+
+
+def validate_data(df):
+    """报告异常并停止，保留全部原始记录。"""
+    if df.empty or set(df.columns) != set(FIELDS) or len(df.columns) != 12:
+        raise ValueError("数据必须非空且恰含 12 个原始字段")
+    if df.isna().any().any():
+        raise ValueError("存在缺失值：" + str(df.isna().sum().loc[lambda x: x > 0].to_dict()))
+    if set(df["segment"]) != set(ARMS):
+        raise ValueError("segment 必须包含且只包含三个合法实验组")
+    for field in ("visit", "conversion", "mens", "womens", "newbie"):
+        if not df[field].isin([0, 1]).all():
+            raise ValueError(f"{field} 必须为 0/1")
+    for field in ("history", "recency", "spend"):
+        if not pd.api.types.is_numeric_dtype(df[field]) or not np.isfinite(df[field]).all():
+            raise ValueError(f"{field} 必须为有限数值")
+        if (df[field] < 0).any():
+            raise ValueError(f"{field} 含负数")
+    if ((df["conversion"] == 1) != (df["spend"] > 0)).any():
+        raise ValueError("conversion 与 spend>0 不一致")
+    for field in ("channel", "zip_code", "history_segment"):
+        if df[field].astype(str).str.strip().eq("").any():
+            raise ValueError(f"{field} 存在空分类")
+    groups = purchase_groups(df)
+    required_levels = {
+        "purchase_group": (groups, {"仅买过男装", "仅买过女装", "两类都买过"}),
+        "newbie": (df["newbie"], {0, 1}),
+        "channel": (df["channel"], {"Phone", "Web", "Multichannel"}),
+    }
+    for feature, (values, expected) in required_levels.items():
+        if set(values) != expected:
+            raise ValueError(f"{feature} 缺少必要分群或包含未知类别")
+    return df
+
+
+def load_data(path):
+    return validate_data(pd.read_csv(path))
+
+
+def srm_test(df):
+    counts = df["segment"].value_counts().reindex(ARMS, fill_value=0)
+    if df.empty or not df["segment"].isin(ARMS).all():
+        raise ValueError("SRM 需要非空且合法的实验分配")
+    expected = np.repeat(len(df) / 3, 3)
+    test = chisquare(counts.to_numpy(), f_exp=expected)
+    return pd.DataFrame({"observed": counts, "expected": expected}), float(test.statistic), float(test.pvalue)
+
+
+def business_metrics(df):
+    if df.empty or set(df["segment"]) != set(ARMS):
+        raise ValueError("业务指标需要三个非空实验组")
+    table = df.groupby("segment").agg(
+        n=("spend", "size"), visitors=("visit", "sum"), visit_rate=("visit", "mean"),
+        buyers=("conversion", "sum"), conversion_rate=("conversion", "mean"),
+        revenue=("spend", "sum"), rpc=("spend", "mean"))
+    table["buyer_spend"] = table["revenue"] / table["buyers"].replace(0, np.nan)
+    table["uplift"] = table["rpc"] - table.loc["No E-Mail", "rpc"]
+    return table
+
+
+def holm(pvalues):
+    values = np.asarray(pvalues, dtype=float)
+    if values.size == 0 or not np.isfinite(values).all() or ((values < 0) | (values > 1)).any():
+        raise ValueError("Holm 需要非空且位于 [0,1] 的有限 P 值")
+    return multipletests(values, method="holm")[1]
+
+
+def welch_result(a, b):
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    if min(a.size, b.size) < 2 or not np.isfinite(a).all() or not np.isfinite(b).all():
+        raise ValueError("Welch 每组至少需要两个有限观测")
+    va, vb = a.var(ddof=1) / a.size, b.var(ddof=1) / b.size
+    variance = va + vb
+    if variance == 0:
+        raise ValueError("Welch 总方差为零，无法推断")
+    degrees = variance**2 / (va**2 / (a.size - 1) + vb**2 / (b.size - 1))
+    diff = a.mean() - b.mean()
+    width = t.ppf(0.975, degrees) * np.sqrt(variance)
+    return dict(diff=float(diff), low=float(diff - width), high=float(diff + width),
+                p=float(ttest_ind(a, b, equal_var=False).pvalue))
+
+
 def welch_interval(a, b):
-    """计算双侧 95% Welch–Satterthwaite 均值差区间。"""
-    variance_a = a.var(ddof=1) / len(a)
-    variance_b = b.var(ddof=1) / len(b)
-    variance = variance_a + variance_b
-    df = variance**2 / (
-        variance_a**2 / (len(a) - 1) + variance_b**2 / (len(b) - 1)
-    )
-    half_width = t.ppf(0.975, df) * np.sqrt(variance)
-    difference = a.mean() - b.mean()
-    return difference - half_width, difference + half_width
-
-parser = argparse.ArgumentParser(description="复现 Hillstrom 邮件实验分析")
-parser.add_argument("csv", nargs="?", type=Path, default=Path(__file__).resolve().parent / "data" / "hillstrom.csv")
-df = pd.read_csv(parser.parse_args().csv)
-print(df.shape)
-
-# 阶段 1｜数据质量与随机分组
-
-# 1.1 数据质量：字段类型和缺失情况
-# 1. 查看数据基本信息和每一列的数据类型
-df.info()
-print(df.isna().sum())
-
-# 统计三个实验组各有多少名客户
-print(df["segment"].value_counts())
-# 计算每个实验组占总客户数的百分比
-print(df["segment"].value_counts(normalize=True) * 100)
-
-# 1.2 随机分组平衡描述：干预前的历史消费、购买偏好、地区和渠道等
-#三个实验组的客户，在收到邮件之前，历史消费水平是否接近？
-print(df.groupby("segment")["history"].mean().round(2))
-
-# 计算三个实验组的平均最近购买间隔（月）
-print(df.groupby("segment")["recency"].mean().round(2))
-
-# 计算每个实验组的新客户占比（百分数）
-print((df.groupby("segment")["newbie"].mean() * 100).round(2))
-
-# 查看三个实验组的历史购买渠道分布
-print(pd.crosstab(df["segment"],df["channel"]))
-
-# 查看各实验组内部的购买渠道占比（%）
-#示按照交叉表的每一行计算比例  normalize="index"
-print(
-    (pd.crosstab(df["segment"], df["channel"], normalize="index") * 100).round(2)
-)
-
-# 各实验组过去购买过男装的客户占比
-print((df.groupby("segment")["mens"].mean() * 100).round(2))
-print((df.groupby("segment")["womens"].mean() * 100).round(2))
-
-print(
-    (pd.crosstab(df['segment'], df['zip_code'],normalize = "index") * 100).round(2)
-)
-
-print(
-    (pd.crosstab(df["segment"], df["history_segment"], normalize="index") * 100).round(2)
-)
-
-# 阶段 2｜营销业务指标：访问率、转化率、销售额和 RPC
-
-# 2.1 网站访问指标
-
-print(df.groupby("segment")["visit"].sum())
-# 各实验组的网站访问率（百分比）
-print((df.groupby("segment")["visit"].mean() * 100).round(2))
-
-# 2.2 购买转化指标
-print(df.groupby("segment")["conversion"].sum())
-print((df.groupby("segment")["conversion"].mean() * 100).round(2))
-
-# 2.3 销售额、RPC、付费客户平均消费
-
-print(df.groupby("segment")["spend"].sum().round(2))
-# 2. 计算三个实验组的客户平均消费金额
-print(df.groupby("segment")["spend"].mean().round(2))
-
-# 筛选实验后实际购买过商品的客户
-buyers = df[df["conversion"] == 1]
-# 计算三个实验组中购买客户的平均消费额
-print(buyers.groupby("segment")["spend"].mean().round(2))
-
-# 计算每组的客户平均销售额
-rpc = df.groupby("segment")["spend"].mean()
-# 取出不发邮件组的人均销售额
-control_rpc = rpc["No E-Mail"]
-print((rpc - control_rpc).round(4))
-
-# 阶段 3｜统计推断：比例检验、均值检验、置信区间和多重比较
-
-# 3.1 访问率：三组两两比例 Z 检验 + Newcombe 区间 + Holm 校正
-
-#proportions_ztest()：比较两个独立样本的比例是否存在统计差异。
-#confint_proportions_2indep()：计算两个独立比例之差的置信区间。
-
-# 1. 取出男装邮件组和对照组
-mens = df[df["segment"] == "Mens E-Mail"]
-control = df[df["segment"] == "No E-Mail"]
-
-# 2. 统计访问人数和总人数
-x1 = mens["visit"].sum()
-n1=len(mens)
-
-x0 = control["visit"].sum()
-n0 = len(control)
-
-# 3. 双样本比例 Z 检验
-z_stat,p_value = proportions_ztest(
-    [x1,x0],[n1, n0],
-    alternative="two-sided"
-)
-
-# 4. 计算比例差异的 95% 置信区间
-low, high = confint_proportions_2indep(
-    x1, n1, x0, n0,
-    compare="diff",
-    method="newcomb"
-)
-
-print("访问率差异：",round((x1/n1 - x0/n0)*100,2))
-print("P值: ",p_value)
-print("95%置信区间：",round(low*100, 2),round(high*100, 2))
-
-womens = df[df["segment"] == "Womens E-Mail"]
-
-x_w = womens["visit"].sum()
-n_w = len(womens)
-x_c = control["visit"].sum()
-n_c = len(control)
-
-z_w, p_w = proportions_ztest(
-    [x_w, x_c], [n_w,n_c],
-    alternative="two-sided"
-)
-
-low_w, high_w = confint_proportions_2indep(
-    x_w, n_w, x_c, n_c,
-    compare="diff",
-    method="newcomb"
-)
-
-print("访问率差异：",round((x_w/n_w - x_c/n_c)*100, 2))
-print("P 值：",p_w)
-print("95%置信区间：",round(low_w*100,2), round(high_w*100,2))
-
-# 第三次比较：男装邮件 vs 女装邮件
-# 统计男装邮件组的访问人数和总人数
-x_m = mens["visit"].sum()
-n_m = len(mens)
-
-# 进行双侧比例 Z 检验
-z_mw,p_mw = proportions_ztest(
-    [x_m,x_w],[n_m,n_w],
-    alternative = "two-sided"
-)
-
-low_mw, high_mw = confint_proportions_2indep(
-    x_m, n_m,x_w,n_w,
-    compare = "diff",
-    method = "newcomb"
-)
-
-print("访问率差异：",round((x_m/n_m - x_w/n_w)*100, 2))
-print("P值:",p_mw)
-print("95%置信区间：",round(low_mw*100,2),round(high_mw*100,2))
-
-#当我们同时检验多个假设时，不能忽视反复寻找显著差异所带来的假阳性风险。
-
-p_values = [p_value, p_w,p_mw]
-
-# Holm 多重比较校正
-#这个函数会返回四个结果，我们当前只需要前两个。
-#- reject：每个检验是否拒绝原假设，True 表示拒绝。
-#- p_adjusted：经过 Holm 校正后的 P 值。
-reject, p_adjusted, _, _ = multipletests(
-    p_values,
-    alpha = 0.05,
-    method = "holm"
-)
-
-print("校正后的P值：",p_adjusted)
-print("是否拒绝原假设：", reject)
-
-# 3.2 转化率：三组两两比例 Z 检验 + Newcombe 区间 + Holm 校正
-
-# 1. 定义需要比较的三个组别组合
-pairs = [
-    ("Mens E-Mail", "No E-Mail"),
-    ("Womens E-Mail","No E-Mail"),
-    ("Mens E-Mail","Womens E-Mail")
-]
-
-results = []
-
-# 2. 循环进行三次检验
-for group1, group2 in pairs:
-
-    a = df[df["segment"] == group1]["conversion"]
-    b = df[df["segment"] == group2]["conversion"]
-
-    x1, n1 = a.sum(), len(a)
-    x2, n2 = b.sum(), len(b)
-
-    z, p = proportions_ztest(
-        [x1,x2], [n1,n2],
-        alternative = "two-sided"
-    )
-
-    lower, upper = confint_proportions_2indep(
-        x1, n1, x2, n2,
-        compare = "diff",
-        method = "newcomb"
-    )
-
-    results.append([
-        f"{group1} vs {group2}",
-        (x1/n1 - x2/n2) * 100,
-        lower *100,
-        upper *100,
-        p
-    ])
-
-summary = pd.DataFrame(
-    results,
-    columns=["比较", "差异(pp)", "95%下限(pp)", "95%上限(pp)", "原始P"]
-)
-
-# 4. 对转化率的三个比较统一做 Holm 校正
-#从函数返回的多个结果中，取出第 2 个结果( 校正后的 P 值。
-summary["Holm校正P"] = multipletests(
-    summary["原始P"],
-    method="holm"
-)[1]
-summary["校正后显著"] = summary["Holm校正P"] < 0.05
-print("\n转化率三组两两比较：")
-print(summary.to_string(index=False))
-
-# 3.3 RPC：Welch t 检验 + 均值差置信区间 + Holm 校正
-
-pairs = [
-    ("Mens E-Mail", "No E-Mail"),
-    ("Womens E-Mail", "No E-Mail"),
-    ("Mens E-Mail", "Womens E-Mail")
-]
-
-results = []
-for group1, group2 in pairs:
-    a = df[df["segment"] == group1]["spend"]
-    b = df[df["segment"] == group2]["spend"]
-
-    #Welch t检验
-    test = ttest_ind(a, b, equal_var = False)
-
-    # 均值差异的95%置信区间
-    ci_low, ci_high = welch_interval(a, b)
-
-    results.append([
-        f"{group1} vs {group2}",
-        a.mean() - b.mean(),
-        ci_low,
-        ci_high,
-        test.pvalue
-    ])
-
-# 3. 整理结果
-summary = pd.DataFrame(
-    results,
-    columns=["比较", "人均差异", "CI下限", "CI上限", "原始P"]
-)
-
-# 4. Holm校正
-summary["Holm校正P"] = multipletests(
-    summary["原始P"],
-    method="holm"
-)[1]
-
-summary["是否显著"] = summary["Holm校正P"] < 0.05
-
-print(summary.to_string(index=False))
-
-# 3.4 RPC：Bootstrap 百分位置信区间（每次重抽样 3000 次）
-# 设置随机种子，保证结果可复现  建一个随机数生成器
-rng = np.random.default_rng(42)
-
-pairs = [
-    ("Mens E-Mail", "No E-Mail"),
-    ("Womens E-Mail", "No E-Mail"),
-    ("Mens E-Mail", "Womens E-Mail")
-]
-
-for group1, group2 in pairs:
-    a = df[df["segment"] == group1]["spend"].to_numpy()
-    b = df[df["segment"] == group2]["spend"].to_numpy()
-
-    diffs = []
-    for _ in range(3000):
-        #从 a 中有放回抽样，抽取与原来相同数量的记录
-         sample_a = rng.choice(a, size = len(a), replace = True)
-         sample_b = rng.choice(b, size = len(b), replace = True)
-
-         diff = sample_a.mean() - sample_b.mean()
-         diffs.append(diff)
-
-    # 计算95% Bootstrap置信区间
-    low, high = np.percentile(diffs, [2.5, 97.5])
-    print(f"\n{group1} vs {group2}")
-    print(f"均值差：{a.mean() - b.mean():.4f}")
-    print(f"Bootstrap 95% CI: [{low:.4f}, {high:.4f}]")
-
-# 3.5 汇总访问率/转化率/RPC 共 9 个比较，并统一 Holm 校正
-
-# 三个指标
-metrics = ["visit", "conversion", "spend"]
-
-# 三组比较
-pairs = [
-    ("Mens E-Mail", "No E-Mail"),
-    ("Womens E-Mail", "No E-Mail"),
-    ("Mens E-Mail", "Womens E-Mail")
-]
-
-results = []
-for metric in metrics:
-    for group1, group2 in pairs:
-        a = df[df["segment"] == group1][metric]
-        b = df[df["segment"] == group2][metric]
-
-        if metric in ["visit", "conversion"]:
-             # 二分类指标：比例Z检验
-             _, p = proportions_ztest(
-                 [a.sum(), b.sum()],[len(a), len(b)]
-             )
-
-             diff = (a.mean() - b.mean()) * 100
-        else:
-             # 消费金额：Welch t检验
-             p = ttest_ind(a, b, equal_var = False).pvalue
-             diff = a.mean() - b.mean()
-
-        results.append([
-            metric, f"{group1} vs {group2}", diff, p
-        ])
-
-# 整理九次比较结果
-report = pd.DataFrame(
-    results,
-    columns=["指标", "比较", "差异", "原始P"]
-)
-
-# 对九个P值统一进行Holm校正
-reject, p_adjusted, _, _ = multipletests(
-    report["原始P"],
-    alpha = 0.05,
-    method = "holm"
-)
-
-report["Holm校正P"] = p_adjusted
-report["是否显著"] = reject
-print(report.to_string(index=False))
-
-# 阶段 4｜营销经济价值：增量收入、假设利润、盈亏平衡与敏感性分析
-
-# 4.1 增量销售额：将人均 uplift 外推到假设的 10 万客户
-# 1. 计算三个组的客户平均销售额
-rpc = df.groupby("segment")["spend"].mean()
-
-# 2. 获取对照组的人均销售额
-control_rpc = rpc["No E-Mail"]
-
-# 3. 假设未来投放10万名客户
-target_n = 100000
-
-# 4. 分别估计两种邮件方案的增量销售额
-for group in ["Mens E-Mail", "Womens E-Mail"]:
-    ## 增量提升。
-    uplift = rpc[group] - control_rpc
-    incremental_revenue = uplift * target_n
-
-    print(f"{group}")
-    print(f"每名客户增量销售额：${uplift:.4f}")
-
-    #,：显示千位分隔符   .2f：保留小数点后两位。
-    print(f"10万名客户预计增量销售额：${incremental_revenue:,.2f}")
-
-# 4.2 基础利润情景与盈亏平衡成本
-margin = 0.30
-cost_per_customer = 0.10
-# 3. 分别计算两种邮件方案的经济效果
-for group in ["Mens E-Mail", "Womens E-Mail"]:
-    uplift = rpc[group] - control_rpc
-
-    # 每名客户的增量利润
-    profit_per_customer = uplift * margin - cost_per_customer
-
-    # 总增量利润
-    total_profit = profit_per_customer * target_n
-
-    # 盈亏平衡时允许的最高营销成本
-    break_even_cost = uplift * margin
-
-    print(f"\n方案：{group}")
-    print(f"人均增量利润：${profit_per_customer:.4f}")
-    print(f"10万客户增量利润：${total_profit:,.2f}")
-    print(f"盈亏平衡营销成本：${break_even_cost:.4f}")
-
-# 4.3 多种毛益率和单位营销成本的敏感性分析
-## 1. 计算两种邮件的人均增量销售额
-rpc = df.groupby("segment")["spend"].mean()
-
-uplift_m = rpc["Mens E-Mail"] - rpc["No E-Mail"]
-uplift_w = rpc["Womens E-Mail"] - rpc["No E-Mail"]
-
-# 2. 设置假设条件
-margins = [0.20, 0.30, 0.40]
-costs = [0.10, 0.20]
-target_n = 100000
-
-results = []
-
-# 3. 遍历不同的成本情景
-for margin in margins:
-    for cost in costs:
-        profit_m = (uplift_m * margin - cost) * target_n
-        profit_w = (uplift_w * margin - cost) * target_n
-        results.append([
-                   f"{margin:.0%}", cost,
-                   round(profit_m, 2),
-                   round(profit_w, 2)
-               ])
-
-scenario_df = pd.DataFrame(
-    results,
-    columns=["毛益率", "单位营销成本", "男装利润", "女装利润"]
-)
-
-print(scenario_df.to_string(index=False))
-
-# 1. 对照组的消费数据
-control = df[df["segment"] == "No E-Mail"]["spend"]
-
-# 2. 设定假设条件
-margin = 0.30
-target_n = 100000
-costs = [0.10, 0.20]
-
-# 3. 分别分析两种邮件方案
-for group in ["Mens E-Mail", "Womens E-Mail"]:
-
-    a = df[df["segment"] == group]["spend"]
-
-    # 计算人均增量销售额
-    uplift = a.mean() - control.mean()
-
-    # Welch均值差的95%置信区间
-    ci_low, ci_high = welch_interval(a, control)
-
-    for cost in costs:
-
-        # 利润点估计
-        profit = (uplift * margin - cost) * target_n
-
-        # 利润置信区间
-        low = (ci_low * margin - cost) * target_n
-        high = (ci_high * margin - cost) * target_n
-
-        print(f"\n方案：{group}，成本：${cost}")
-        print(f"预计利润：${profit:,.2f}")
-        print(f"95%区间：[${low:,.2f}, ${high:,.2f}]")
-
-# 阶段 5｜客户分群、异质性检验与探索性营销策略评价
-# 注意：
-# 本阶段属于探索性策略评价。
-# 因为此前已经分析过全量数据，
-# 当前验证集不构成完全独立的确认性验证。
-# 不应据此宣称分群策略具有稳定的因果增益。
-# 5.1 定义历史购买品类分群并检查样本数
-
-# 1. 定义三种客户分群条件
-conditions = [
-    (df["mens"] == 1) & (df["womens"] == 0),
-    (df["mens"] == 0) & (df["womens"] == 1),
-    (df["mens"] == 1) & (df["womens"] == 1)
-]
-
-# 2. 定义对应的客户群体名称
-labels = ["仅买过男装", "仅买过女装", "两类都买过"]
-
-# 3. 给每个客户添加分群标签  pandas 数据表增加一列。
-df["purchase_group"] = np.select(
-    conditions,labels,default="待检查"
-)
-
-# 4. 统计各群体人数
-print(df["purchase_group"].value_counts())
-
-# 5. 检查各群体在三个实验组中的人数
-print(pd.crosstab(df["purchase_group"],df["segment"]))
-
-# 5.2 分群平均销售额与相对不发邮件的增量
-# 1. 按客户分群和实验组计算平均销售额
-avg_spend = df.groupby(["purchase_group", "segment"])["spend"].mean().unstack()
-
-print("各组客户平均销售额：")
-print(avg_spend.round(4))
-
-# 2. 计算各分群内的增量销售额
-uplift = pd.DataFrame({
-     "男装邮件增量": avg_spend["Mens E-Mail"] - avg_spend["No E-Mail"],
-      "女装邮件增量": avg_spend["Womens E-Mail"] - avg_spend["No E-Mail"]
-})
-
-print("\n各客户群体的增量销售额：")
-print(uplift.round(4))
-
-# 5.3 交互效应：检验邮件效果是否随客户历史购买群体而变化
-# 1. 定义包含交互效应的统计模型
-formula = "spend ~ C(segment) * C(purchase_group)"
-
-# 2. 检验三种营销方案的整体交互效应
-model_all = smf.ols(formula, data = df).fit(cov_type = "HC3")
-table_all = model_all.wald_test_terms(scalar=True).table
-
-print("三种营销方案的整体交互检验：")
-print(table_all.loc["C(segment):C(purchase_group)"])
-
-# 3. 只比较男装邮件与女装邮件
-emails = df[df["segment"].isin(["Mens E-Mail", "Womens E-Mail"])]
-model_emails = smf.ols(formula, data=emails).fit(cov_type="HC3")
-table_emails = model_emails.wald_test_terms(scalar=True).table
-print("\n男装邮件 vs 女装邮件的交互检验：")
-print(table_emails.loc["C(segment):C(purchase_group)"])
-
-# 5.4 统一策略 A 与分群策略 B 的探索性离线比较
-# A：训练集总体 RPC 最高的一种实验方案，全体客户采用同一选择。
-# B：训练集中按历史购买群体分别挑选 RPC 最高的实验方案。
-
-# 1. 划分训练集与验证集
-train = df.sample(frac = 0.7,random_state = 42)
-
-##排除训练集中的行，剩下的作为验证集
-valid = df.drop(train.index)
-
-# 2. 策略A：从训练集选出最好的统一营销方案
-train_overall = train.groupby("segment")["spend"].mean()
-strategy_a = train_overall.idxmax()
-print("训练集各邮件方案的总体人均销售额：")
-print(train_overall)
-print("策略A选择：", strategy_a)
-
-# 3. 策略B：从同一训练集为每类客户选择方案
-train_mean = train.groupby(
-    ["purchase_group","segment"]
-)["spend"].mean().unstack()
-
-strategy_b = train_mean.idxmax(axis = 1)
-print("\n训练集各群体的平均销售额：")
-print(train_mean)
-print("\n策略B选择：")
-print(strategy_b)
-
-# 4. 验证集计算各群体、各邮件方案的平均销售额
-valid_mean = valid.groupby(
-    ["purchase_group", "segment"]
-)["spend"].mean().unstack()
-
-# 5. 验证集中各客户群体的占比
-weights = valid["purchase_group"].value_counts(normalize = True)
-
-# 6. 按照训练集确定的A规则，评价统一策略
-
-value_a = sum(
-    weights[g] * valid_mean.loc[g, strategy_a]
-    for g in weights.index
-)
-
-# 7. 按照训练集确定的B规则，评价分群策略
-value_b = sum(
-    weights[g] * valid_mean.loc[g, strategy_b[g]]
-    for g in weights.index
-)
-
-print(f"策略A的RPC：${value_a:.4f}")
-print(f"策略B的RPC：${value_b:.4f}")
-print(f"B-A：${value_b-value_a:.4f}")
-
-# 检查A和B在哪些群体的选择不同
-changed = strategy_b[
-    strategy_b != strategy_a
-].index
-
-print("策略不同的客户群体：", list(changed))
-if len(changed) == 0:
-    print("A和B完全相同，无需进行差异检验")
-elif len(changed) == 1:
-    g = changed[0]
-
-    a = valid.loc[
-        (valid["purchase_group"] == g) &
-        (valid["segment"] == strategy_b[g]),
-        "spend"
-    ]
-
-    b = valid.loc[
-        (valid["purchase_group"] == g) &
-        (valid["segment"] == strategy_a),
-        "spend"
-    ]
-
-    test = ttest_ind(a, b, equal_var=False)
-    ci_low, ci_high = welch_interval(a, b)
-    print("Welch检验P值：", test.pvalue)
-    print("整体策略差异：", weights[g] * (a.mean()-b.mean()))
-    print("95%置信区间：",
-          weights[g] * ci_low,
-          weights[g] * ci_high)
-
-else:
-    print("多个群体的方案不同，需要联合估计策略差异及其不确定性")
-
-# 5.5 客户特征与营销效果异质性分析
-# 5.5.1 新老客户的邮件增量销售额
-# 1. 检查各类客户在三个实验组中的人数
-print(pd.crosstab(df["newbie"], df["segment"]))
-
-# 2. 分别计算每个群体的RPC
-newbie_rpc = df.groupby(
-    ["newbie", "segment"]
-)["spend"].mean().unstack()
-
-print("\n新老客户各实验组RPC：")
-print(newbie_rpc.round(4))
-
-# 3. 计算相对于不发邮件的增量RPC
-newbie_uplift = pd.DataFrame({
-    "男装邮件增量":(
-        newbie_rpc["Mens E-Mail"] - newbie_rpc["No E-Mail"]
-    ),
-    "女装邮件增量":(
-        newbie_rpc["Womens E-Mail"] - newbie_rpc["No E-Mail"]
-    )
-})
-print("\n新老客户的增量RPC：")
-print(newbie_uplift.round(4))
-
-# 5.5.2 新老客户的营销效果交互检验
-
-# 1. 建立包含交互效应的模型
-model_newbie = smf.ols(
-    "spend ~ C(segment) * C(newbie)",
-    data = df
-).fit(cov_type="HC3")
-
-# 2. 检验营销方案与新老客户身份的交互效应
-interaction = model_newbie.wald_test_terms(
-    scalar = True
-).table.loc["C(segment):C(newbie)"]
-
-print("新老客户交互效应检验：")
-print(interaction)
-
-# 5.5.3 历史购买渠道的营销增量分析
-
-# 1. 检查各渠道在三个实验组的人数
-print(pd.crosstab(df["channel"], df["segment"]))
-
-# 2. 计算各渠道、各实验组的RPC
-channel_rpc = df.groupby(
-    ["channel", "segment"]
-)["spend"].mean().unstack()
-print("\n各渠道的RPC：")
-print(channel_rpc.round(4))
-
-# 3. 计算相对于不发邮件的增量RPC
-channel_uplift = pd.DataFrame({
-    "男装邮件增量": (
-        channel_rpc["Mens E-Mail"] - channel_rpc["No E-Mail"]
-    ),
-    "女装邮件增量": (
-        channel_rpc["Womens E-Mail"] - channel_rpc["No E-Mail"]
-    )
-})
-
-print("\n各渠道增量RPC：")
-print(channel_uplift.round(4))
-
-# 5.5.4 历史购买渠道的交互效应检验
-model_channel = smf.ols(
-    "spend ~ C(segment) * C(channel)",
-    data = df
-).fit(cov_type = "HC3")
-
-channel_test = model_channel.wald_test_terms(
-    scalar = True
-).table.loc["C(segment):C(channel)"]
-
-print("历史购买渠道交互效应检验：")
-print(channel_test)
-
-# 5.5.5 两项交互效应检验的Holm校正
-# 1. 提取新老客户交互检验的P值
-p_newbie = interaction["pvalue"]
-
-# 2. 提取历史渠道交互检验的P值
-p_channel = channel_test["pvalue"]
-
-# 3. 整理结果
-interaction_report = pd.DataFrame({
-    "客户特征": ["newbie", "channel"],
-    "原始P": [p_newbie, p_channel]
-})
-
-# 4. Holm校正
-interaction_report["Holm校正P"] = multipletests(
-    interaction_report["原始P"],
-    method="holm"
-)[1]
-
-interaction_report["是否显著"] = (
-    interaction_report["Holm校正P"] < 0.05
-)
-
-print(interaction_report.to_string(index=False))
+    result = welch_result(a, b)
+    return result["low"], result["high"]
+
+
+def proportion_result(a, b):
+    a, b = np.asarray(a), np.asarray(b)
+    if min(a.size, b.size) == 0 or not np.isin(a, [0, 1]).all() or not np.isin(b, [0, 1]).all():
+        raise ValueError("比例比较需要非空二元观测")
+    if a.sum() + b.sum() in (0, a.size + b.size):
+        raise ValueError("合并比例为 0 或 1，Z 检验无法推断")
+    low, high = confint_proportions_2indep(a.sum(), a.size, b.sum(), b.size,
+                                         compare="diff", method="newcomb")
+    return dict(diff=float(a.mean() - b.mean()), low=float(low), high=float(high),
+                p=float(proportions_ztest([a.sum(), b.sum()], [a.size, b.size])[1]))
+
+
+def comparisons(df):
+    rows = []
+    for metric in ("visit", "conversion", "spend"):
+        for arm_a, arm_b in PAIRS:
+            a = df.loc[df["segment"] == arm_a, metric]
+            b = df.loc[df["segment"] == arm_b, metric]
+            result = welch_result(a, b) if metric == "spend" else proportion_result(a, b)
+            rows.append(dict(metric=metric, comparison=f"{arm_a} vs {arm_b}", **result))
+    table = pd.DataFrame(rows)
+    table["holm_metric"] = table.groupby("metric")["p"].transform(holm)
+    table["holm_nine"] = holm(table["p"])
+    return table
+
+
+def bootstrap_rpc(df, repetitions=3000, seed=42):
+    """保持历史逐对逐次的抽样顺序，与新增敏感性分析使用独立随机流。"""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for arm_a, arm_b in PAIRS:
+        a = df.loc[df["segment"] == arm_a, "spend"].to_numpy()
+        b = df.loc[df["segment"] == arm_b, "spend"].to_numpy()
+        draws = [rng.choice(a, a.size).mean() - rng.choice(b, b.size).mean()
+                 for _ in range(repetitions)]
+        low, high = np.percentile(draws, [2.5, 97.5])
+        rows.append(dict(comparison=f"{arm_a} vs {arm_b}", low=low, high=high))
+    return pd.DataFrame(rows)
+
+
+def cell_values(df, feature, minimum=2):
+    cells = {}
+    if df.empty or df[feature].isna().any():
+        raise ValueError(f"{feature} 分群为空或缺失")
+    for group in sorted(df[feature].unique()):
+        for arm in ARMS:
+            values = df.loc[(df[feature] == group) & (df["segment"] == arm), "spend"].to_numpy()
+            if len(values) < minimum:
+                raise ValueError(f"{feature}={group}, {arm} 单元格至少需要 {minimum} 人")
+            cells[group, arm] = values
+    return cells
+
+
+def interaction_test(df, feature, emails_only=False):
+    cell_values(df, feature)
+    data = df[df["segment"].isin(ARMS[:2])] if emails_only else df
+    model = smf.ols(f"spend ~ C(segment) * C({feature})", data=data).fit(cov_type="HC3")
+    row = model.wald_test_terms(scalar=True).table.loc[f"C(segment):C({feature})"]
+    return float(row["pvalue"])
+
+
+def select_policies(train):
+    cell_values(train, "purchase_group")
+    means = train.groupby(["purchase_group", "segment"])["spend"].mean().unstack()
+    return train.groupby("segment")["spend"].mean().idxmax(), means.idxmax(axis=1)
+
+
+def evaluate_policies(valid, strategy_a, strategy_b):
+    """固定群体权重；独立单元格均值的加权方差及 Satterthwaite 近似。"""
+    cells = cell_values(valid, "purchase_group")
+    weights = valid["purchase_group"].value_counts(normalize=True)
+    if strategy_a not in ARMS or set(strategy_b.index) != set(weights.index) or not strategy_b.isin(ARMS).all():
+        raise ValueError("策略须覆盖全部验证群体并选择合法方案")
+    value_a = sum(weights[g] * cells[g, strategy_a].mean() for g in weights.index)
+    value_b = sum(weights[g] * cells[g, strategy_b[g]].mean() for g in weights.index)
+    terms, denominator = [], 0.0
+    for group, weight in weights.items():
+        if strategy_b[group] == strategy_a:
+            continue
+        for arm in (strategy_b[group], strategy_a):
+            values = cells[group, arm]
+            term = weight**2 * values.var(ddof=1) / len(values)
+            terms.append(term)
+            denominator += term**2 / (len(values) - 1)
+    diff = value_b - value_a
+    variance = sum(terms)
+    if not terms:
+        return dict(value_a=float(value_a), value_b=float(value_b), diff=0.0, low=0.0, high=0.0, p=None)
+    if variance == 0:
+        raise ValueError("策略差异总方差为零，无法推断")
+    degrees = variance**2 / denominator
+    width = t.ppf(0.975, degrees) * np.sqrt(variance)
+    return dict(value_a=float(value_a), value_b=float(value_b), diff=float(diff),
+                low=float(diff - width), high=float(diff + width),
+                p=float(2 * t.sf(abs(diff) / np.sqrt(variance), degrees)))
+
+
+def diagnostics(df, feature):
+    return df.groupby([feature, "segment"])["spend"].agg(
+        n="size", nonzero=lambda x: (x > 0).sum(), nonzero_rate=lambda x: (x > 0).mean(),
+        mean="mean", skew="skew", p99=lambda x: x.quantile(0.99), maximum="max")
+
+
+def bootstrap_interactions(df, repetitions=3000, seed=42):
+    """分层估计两邮件效果差的群体间差值，单项区间不充当整体交互检验。"""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for feature in ("purchase_group", "newbie", "channel"):
+        cells = cell_values(df, feature)
+        groups = sorted(df[feature].unique())
+        reference = groups[0]
+        effects = {}
+        for group in groups:
+            a, b = cells[group, ARMS[0]], cells[group, ARMS[1]]
+            effects[group] = np.array([
+                rng.choice(a, a.size).mean() - rng.choice(b, b.size).mean()
+                for _ in range(repetitions)])
+        for group in groups[1:]:
+            point = (cells[group, ARMS[0]].mean() - cells[group, ARMS[1]].mean()
+                     - cells[reference, ARMS[0]].mean() + cells[reference, ARMS[1]].mean())
+            low, high = np.percentile(effects[group] - effects[reference], [2.5, 97.5])
+            rows.append(dict(feature=feature, group=str(group), reference=str(reference),
+                             diff=point, low=low, high=high))
+    return pd.DataFrame(rows)
+
+
+def run_analysis(df, repetitions=3000):
+    validate_data(df)
+    data = df.copy()
+    data["purchase_group"] = purchase_groups(data)
+    print("\n阶段 1｜数据质量、SRM 与描述性基线")
+    counts, statistic, pvalue = srm_test(data)
+    print(counts.to_string())
+    print(f"SRM chi2={statistic:.9f}, p={pvalue:.9f}")
+    print(data.groupby("segment")[["history", "recency", "newbie", "mens", "womens"]].mean())
+    for feature in ("history_segment", "channel", "zip_code"):
+        print(pd.crosstab(data["segment"], data[feature], normalize="index").to_string())
+    print("\n阶段 2｜业务指标（金额为美元，比例为 0–1）")
+    metrics = business_metrics(data)
+    print(metrics.to_string())
+    print("\n阶段 3｜双侧比较、单项 95% CI 与 Holm")
+    tests = comparisons(data)
+    print(tests.to_string(index=False))
+    bootstrap = bootstrap_rpc(data, repetitions)
+    print(bootstrap.to_string(index=False))
+    print("\n阶段 4｜10 万客户假设情景；成本、毛益均为假设")
+    scenarios = []
+    for arm in ARMS[:2]:
+        uplift = metrics.loc[arm, "uplift"]
+        ci = tests.loc[(tests.metric == "spend") & (tests.comparison == f"{arm} vs No E-Mail")].iloc[0]
+        print(arm, "增量销售额", uplift * 100000, "30% 毛益盈亏平衡成本", uplift * 0.3)
+        for margin in (0.2, 0.3, 0.4):
+            for cost in (0.1, 0.2):
+                scenarios.append(dict(arm=arm, margin=margin, cost=cost,
+                                      per_customer=uplift * margin - cost,
+                                      profit=(uplift * margin - cost) * 100000,
+                                      low=(ci.low * margin - cost) * 100000,
+                                      high=(ci.high * margin - cost) * 100000))
+    print(pd.DataFrame(scenarios).to_string(index=False))
+    print("\n阶段 5｜历史品类与探索性策略；5.5 新老客户、历史渠道")
+    interactions = {}
+    for feature in ("purchase_group", "newbie", "channel"):
+        print(feature)
+        print(diagnostics(data, feature).to_string())
+        means = data.groupby([feature, "segment"])["spend"].mean().unstack()
+        print(means.to_string())
+        print(means.loc[:, list(ARMS[:2])].sub(means["No E-Mail"], axis=0).to_string())
+        interactions[feature] = interaction_test(data, feature)
+    interactions["emails"] = interaction_test(data, "purchase_group", emails_only=True)
+    print("HC3 原始 P", interactions)
+    print("5.5 两项 Holm", holm([interactions["newbie"], interactions["channel"]]))
+    train = data.sample(frac=0.7, random_state=42)
+    valid = data.drop(train.index)
+    strategy_a, strategy_b = select_policies(train)
+    print("训练总体 RPC", train.groupby("segment")["spend"].mean().to_dict())
+    print("训练群体 RPC", train.groupby(["purchase_group", "segment"])["spend"].mean().unstack())
+    print("验证群体 RPC", valid.groupby(["purchase_group", "segment"])["spend"].mean().unstack())
+    print("验证权重", valid["purchase_group"].value_counts(normalize=True))
+    policy = evaluate_policies(valid, strategy_a, strategy_b)
+    print("A", strategy_a, "B", strategy_b.to_dict(), "验证结果", policy)
+    sensitivity = bootstrap_interactions(data, repetitions)
+    print("分层 Bootstrap 单项敏感性区间")
+    print(sensitivity.to_string(index=False))
+    return dict(n=len(data), counts=counts["observed"].to_dict(), rpc=metrics["rpc"].to_dict(),
+                p_all=interactions["purchase_group"], p_emails=interactions["emails"],
+                policy_difference=policy["diff"], policy_p=policy["p"],
+                p_newbie=interactions["newbie"], p_channel=interactions["channel"],
+                srm=dict(statistic=statistic, p=pvalue),
+                bootstrap_rpc=bootstrap.to_dict("records"),
+                sensitivity=sensitivity.to_dict("records"))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="复现 Hillstrom 五阶段邮件实验")
+    parser.add_argument("csv", nargs="?", type=Path, default=Path(__file__).resolve().parent / "data/hillstrom.csv")
+    parser.add_argument("--output-json", type=Path, help="可选本地机器可读验证结果")
+    args = parser.parse_args()
+    result = run_analysis(load_data(args.csv))
+    if args.output_json:
+        args.output_json.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf8")
+
+
+if __name__ == "__main__":
+    main()

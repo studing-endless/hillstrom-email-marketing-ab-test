@@ -11,7 +11,7 @@
 
 ## 2026-11-23 最终整改验证
 
-修改前基准为 0589a963891be690032a8184a25eb219a82e6172。修改前 main 与 origin/main 同步，只有用户未跟踪的 .vscode 目录。本次分支为 improve/statistical-quality；原始 Word、CSV 与已发布提交保留。旧脚本先在历史环境运行，stdout 及关键值保存在本地忽略目录 .local-audit，未提交原始数据或运行日志。
+修改前基准为 0589a963891be690032a8184a25eb219a82e6172。修改前 main 与 origin/main 同步，只有用户未跟踪的 .vscode 目录。整改在 improve/statistical-quality 分支完成；该分支后续已通过 PR #1 合并到 main。原始 Word、CSV 与已发布提交保留。旧脚本先在历史环境运行，stdout 及关键值保存在本地忽略目录 .local-audit，未提交原始数据或运行日志。
 
 ### 实际环境与执行命令
 
@@ -62,4 +62,4 @@ py -3.13 -m venv .venv
 
 仓库级作者配置为 studing-endless，邮箱为 257683604+studing-endless@users.noreply.github.com。该身份来自本地 Olist 正式仓库提交 d10c3a4，账号 ID 与 GitHub 连接器返回的 257683604 一致。GitHub 私有邮箱设置页未读取，因此不声称检查了所有已验证邮箱。全局配置未修改，历史 Codex 提交保留。
 
-About Description 和五项 Topics 已通过 GitHub API 更新并回读确认。仓库目前无 LICENSE，未自行选择开源许可证。原始 CSV 的再分发许可仍未确认，读者按来源获取数据。本次仅推送独立分支，供进一步审阅。
+About Description 和五项 Topics 已通过 GitHub API 更新并回读确认。仓库目前无 LICENSE，未自行选择开源许可证。原始 CSV 的再分发许可仍未确认，读者按来源获取数据。整改及复现命令修正已通过 [PR #1](https://github.com/studing-endless/hillstrom-email-marketing-ab-test/pull/1) 合并到 main，合并提交为 c53973d2175ec6834f901ac733ab468b3df6e473。合并后 Linux CI 为 34 passed、1 skipped，缺少公开 CSV 时跳过全量集成项符合预期。已实际验证的全量环境为 Windows Python 3.13.6，Linux CI 验证合成测试；macOS 以及 Python 3.10、3.11、3.12 的全量运行尚未验证。

@@ -29,11 +29,36 @@
 
 ## 复现
 
-使用 Python、pandas、NumPy、SciPy 和 statsmodels。按[数据获取说明](data/README.md)保存 CSV 到 data/hillstrom.csv。
+已在 Windows PowerShell、稳定版 Python 3.13.6 的隔离环境完成验证，核心依赖为 NumPy 2.2.6、pandas 2.2.3、SciPy 1.15.3、statsmodels 0.14.4。按[数据获取说明](data/README.md)保存 CSV 到 data/hillstrom.csv。
 
-```sh
-python -m pip install -r requirements.txt
-python -X utf8 analysis.py
+以下命令在仓库根目录执行，需要先安装稳定版 Python 3.13，并按上述说明下载数据。每一步都直接调用虚拟环境中的 Python。
+
+**Windows PowerShell**
+
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -X utf8 analysis.py data/hillstrom.csv
 ```
 
+**macOS / Linux（bash 或 zsh）**
+
+```sh
+python3.13 -m venv .venv
+./.venv/bin/python -m pip install -r requirements.txt
+./.venv/bin/python -m pytest -q
+./.venv/bin/python -X utf8 analysis.py data/hillstrom.csv
+```
+
+若尚未下载 CSV，可以先运行测试；全量数据集成项会明确跳过，分析命令需在数据就位后执行。本地全量复现环境为 Windows，Linux 合成测试由 GitHub Actions 验证，macOS 命令尚未实机执行。
+
 也可将原始 CSV 路径作为脚本的第一个参数。analysis.py 包含五阶段与第 5.5 节，docs/ 保存报告、方法、字典和运行记录，data/ 保存下载指引。
+
+## 质量检查与测试导航
+
+[分析代码](analysis.py) 包含输入校验、1:1:1 SRM、原主分析和单元格内 Bootstrap 敏感性。[测试](tests/test_analysis.py) 使用合成数据覆盖指标、区间、Holm、SRM、标签、策略选择与多群体评价、随机种子和异常报错。本地原始 CSV 存在时另执行全量集成复现；缺少 CSV 时该项明确跳过。CI 使用合成测试，不能替代原始数据的集成验证。
+
+[统计质量与敏感性审查](docs/statistical-quality.md) 列出消费分布和五项分层效果差区间。[验证记录](docs/verification.md) 保留历史与本次环境、命令和回归比较。跨平台命令以所选稳定 Python 已安装为前提，本次实际执行环境是 Windows。
+
+主要限制包括历史人群和两周结果的可迁移性、假设成本与毛益、先看全量再拆分的探索性质，以及个别单元格少量非零消费。新增区间为单项敏感性结果，项目全部探索尚未统一控制错误率。

@@ -31,14 +31,27 @@
 
 已在 Windows PowerShell、稳定版 Python 3.13.6 的隔离环境完成验证，核心依赖为 NumPy 2.2.6、pandas 2.2.3、SciPy 1.15.3、statsmodels 0.14.4。按[数据获取说明](data/README.md)保存 CSV 到 data/hillstrom.csv。
 
-```sh
-python -m venv .venv
-# Windows 使用 .venv/Scripts/python，macOS/Linux 使用 .venv/bin/python
-# 或先按本机 shell 的方式激活虚拟环境，再运行下列命令
-python -m pip install -r requirements.txt
-python -X utf8 analysis.py
-python -m pytest -q
+以下命令在仓库根目录执行，需要先安装稳定版 Python 3.13，并按上述说明下载数据。每一步都直接调用虚拟环境中的 Python。
+
+**Windows PowerShell**
+
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -X utf8 analysis.py data/hillstrom.csv
 ```
+
+**macOS / Linux（bash 或 zsh）**
+
+```sh
+python3.13 -m venv .venv
+./.venv/bin/python -m pip install -r requirements.txt
+./.venv/bin/python -m pytest -q
+./.venv/bin/python -X utf8 analysis.py data/hillstrom.csv
+```
+
+若尚未下载 CSV，可以先运行测试；全量数据集成项会明确跳过，分析命令需在数据就位后执行。本地全量复现环境为 Windows，Linux 合成测试由 GitHub Actions 验证，macOS 命令尚未实机执行。
 
 也可将原始 CSV 路径作为脚本的第一个参数。analysis.py 包含五阶段与第 5.5 节，docs/ 保存报告、方法、字典和运行记录，data/ 保存下载指引。
 

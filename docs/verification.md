@@ -1,65 +1,115 @@
-# 复现与代码审计
+# 正式复现说明
 
-在 Windows PowerShell 上用 Python 3.9.0rc2、NumPy 1.24.1、pandas 1.5.3、SciPy 1.10.0、statsmodels 0.14.4 验证。工作区只有 analysis.py，整理前备份到本地 analysis.original.py。
+## 1. 数据与运行环境
 
-运行 `python analysis.py (Get-ChildItem *.csv).Name`，退出码 0，执行到第 5.5 节 Holm 输出。复跑确认 64,000 × 12、无缺失，男装、女装、对照人数为 21,307、21,387、21,306。相对对照 RPC 增量 +0.769827、+0.424412。品类整体和仅邮件交互 P 分别为 0.141812、0.041738。B−A = 0.010612，Welch P = 0.957054。newbie 与 channel 原始 P 为 0.051584、0.315287，校正后 0.103168、0.315287。均与任务参考和原稿对应数值在显示精度内一致。
+使用 Kevin Hillstrom 公开的邮件营销随机实验数据，共 64,000 行客户、12 个原始字段，三组为男装邮件、女装邮件和不发邮件，观察发送后两周的结果。原始 CSV 未随仓库分发；请按[数据获取说明](../data/README.md)从作者原始发布获取，保留行顺序并保存为 data/hillstrom.csv。[原始来源](https://blog.minethatdata.com/2008/03/minethatdata-e-mail-analytics-and-data.html)
 
-- 修复第 5.5.4 节 Wald 索引中的多余空格，读取 C(segment):C(channel)。
-- 首次运行在第 3.3 节遇到 SciPy 1.10 缺少置信区间接口。改用 Welch–Satterthwaite 自由度和 t 临界值计算同一双侧区间，原 Welch P 值计算保留。
-- 路径改为可传参，默认定位到脚本旁 data/hillstrom.csv。集中导入，去除未使用的 matplotlib 与重复的交互检验调用。保留种子、样本和检验口径。
-- 策略点估计使用未舍入均值，分别显示四位小数的 A、B 直接相减可能相差 0.0001。
+全量分析、测试和两张图在 Windows PowerShell、Python 3.13.6 隔离环境中实际运行。核心版本如下，固定约束见 [requirements.txt](../requirements.txt)。
 
-## 2026-11-23 最终整改验证
+| 依赖 | 已验证版本 |
+| --- | --- |
+| NumPy | 2.2.6 |
+| pandas | 2.2.3 |
+| SciPy | 1.15.3 |
+| statsmodels | 0.14.4 |
+| Matplotlib | 3.10.7 |
+| pytest | 8.3.5 |
 
-修改前基准为 0589a963891be690032a8184a25eb219a82e6172。修改前 main 与 origin/main 同步，只有用户未跟踪的 .vscode 目录。整改在 improve/statistical-quality 分支完成；该分支后续已通过 PR #1 合并到 main。原始 Word、CSV 与已发布提交保留。旧脚本先在历史环境运行，stdout 及关键值保存在本地忽略目录 .local-audit，未提交原始数据或运行日志。
+Linux GitHub Actions 执行合成数据和图像输出测试。macOS 及 Python 3.10、3.11、3.12 的全量运行尚未验证。图中中文在 Windows 使用 Microsoft YaHei，Linux CI 安装 Noto CJK；macOS 可使用系统 PingFang SC。
 
-### 实际环境与执行命令
+## 2. 安装与运行
 
-实际执行环境为 Windows PowerShell，Python 3.13.6 隔离虚拟环境。本机没有 Python 3.11，因此选用已安装的稳定 Python 3.13。核心依赖为 NumPy 2.2.6、pandas 2.2.3、SciPy 1.15.3、statsmodels 0.14.4、pytest 8.3.5。
+先安装稳定 Python 3.13，在仓库根目录执行。数据就位后可同时生成分析结果和两张 200 DPI PNG。每步直接调用虚拟环境 Python。
 
-其余实际安装版本为 colorama 0.4.6、iniconfig 2.3.1、packaging 26.3、patsy 1.0.3、pluggy 1.7.0、python-dateutil 4.0.0、pytz 2026.6、tzdata 2026.6。requirements.txt 固定核心计算和测试依赖，以上记录补足本次完整环境，间接依赖仍由安装工具解析。
-
-以下为本次在 Windows 实际执行的命令。CSV 路径通过 PowerShell 获取，读者可改为普通文件路径。
+**Windows PowerShell**
 
 ```powershell
 py -3.13 -m venv .venv
-.venv/Scripts/python -m pip install -r requirements.txt
-.venv/Scripts/python -m compileall -q analysis.py tests
-.venv/Scripts/python -m pytest -q
-.venv/Scripts/python analysis.py (Get-ChildItem *.csv).Name --output-json .local-audit/after.json
-.venv/Scripts/python -m pip check
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -X utf8 analysis.py data/hillstrom.csv
+.\.venv\Scripts\python.exe -X utf8 plot_figures.py data/hillstrom.csv
 ```
 
-语法检查和 pip check 通过。最终本地 pytest 为 35 passed，其中 34 项合成/单元验证和 1 项全量 CSV 集成复现。另把代码和测试复制到没有 CSV 的隔离目录执行，得到 34 passed、1 skipped；跳过信息明确说明未执行 64,000 行验证。GitHub Actions 在公开仓库执行合成测试与语法检查，原始数据不在仓库中，该环境全量集成项应跳过。
+**macOS / Linux（bash 或 zsh）**
 
-### 回归比较
+```sh
+python3.13 -m venv .venv
+./.venv/bin/python -m pip install -r requirements.txt
+./.venv/bin/python -m pytest -q
+./.venv/bin/python -X utf8 analysis.py data/hillstrom.csv
+./.venv/bin/python -X utf8 plot_figures.py data/hillstrom.csv
+```
 
-| 项目 | 修改前 | 修改后 |
-| --- | ---: | ---: |
-| 行数 | 64,000 | 64,000 |
-| 男装 / 女装 / 不发人数 | 21,307 / 21,387 / 21,306 | 21,307 / 21,387 / 21,306 |
-| 男装增量 RPC | 0.769827156 | 0.769827156 |
-| 女装增量 RPC | 0.424412216 | 0.424412216 |
-| 品类三方案交互 P | 0.141811990 | 0.141811990 |
-| 品类两封邮件交互 P | 0.041738011 | 0.041738011 |
-| 策略 B−A | 0.010612019 | 0.010612019 |
-| 策略 P | 0.957054219 | 0.957054219 |
-| newbie 交互 P | 0.051584048 | 0.051584048 |
-| channel 交互 P | 0.315287321 | 0.315287321 |
-| 第 5.5 节 Holm | 0.103168096 / 0.315287321 | 0.103168096 / 0.315287321 |
+绘图需要系统中文字体。Ubuntu/Debian 可运行 `sudo apt-get install fonts-noto-cjk`。脚本会检查可用字体，缺少时明确报错。Windows 使用系统微软雅黑，macOS 可使用 PingFang SC，后者尚未实机执行。
 
-关键值与修改前基准在绝对误差 1e-12 下相符。另在新环境重新运行基准提交脚本，逐项比较九个原始 P、九项 Holm 值及三项 RPC Welch 区间，均在同一误差阈值内相符。原有三对 Bootstrap 区间显示精度保持一致。
+主分析和绘图脚本都接受第一个位置参数指定 CSV 路径。plot_figures.py 调用 analysis.py 的正式比较、业务指标和利润情景函数，绘图过程不重复执行 Bootstrap。两张 PNG 默认输出到 figures/。
 
-新增 SRM χ²=0.202531250、P=0.903692958。新增五项分层 Bootstrap 区间及完整单元格诊断见[质量审查](statistical-quality.md)。单变化群体策略区间为 [−0.375690200, 0.396914238]，与原 Welch 权重换算一致。多个变化群体用独立单元格均值方差求和与 Satterthwaite 近似实现，已用合成数据和手算方差核验。
+## 3. 自动化测试
 
-### 实际缺陷与审查判断
+本地原有 35 项测试全部通过，含 64,000 行 CSV 的完整集成复现。展示版另增 2 项测试，分别核对利润参数与全部情景值，以及绘图输入、PNG 格式、尺寸、DPI 和中文缺字警告，共 37 项通过。语法检查与依赖一致性检查也已通过。
 
-修复了导入时立即执行、缺少输入校验及 SRM、重复计算和输出、多个变化群体缺少统计推断、缺少自动测试、历史预发布 Python 环境不足以支撑当前复现等问题。数据加载、指标汇总、比例比较、Welch、Holm、分群、交互检验、策略选择与评价均有可导入函数，main 串联原五阶段和第 5.5 节。
+公开 CI 不含 CSV，原有测试结果为 34 passed、1 skipped；加入两项展示测试后预期为 36 passed、1 skipped。唯一跳过项是需要原始 CSV 的全量集成验证，其跳过原因由测试明确输出。最终执行结果可在 [GitHub Actions](https://github.com/studing-endless/hillstrom-email-marketing-ab-test/actions/workflows/tests.yml) 查看。合成样本验证公式及程序路径，无法替代原始实验数据的复现。
 
-消费右偏本身不构成否定 Welch、Bootstrap 或 OLS+HC3 的理由，分析目标是全体客户平均增量。SRM 未发现异常也不能证明随机化完整无误；基线采用描述性检查。没有发现需要改写历史检验结果的实际算术错误。新分层区间反映部分邮件相对优势差异，同时保留跨零结果及探索限制，未增加预测模型、异常值筛除或新的营销实验。
+如需单独运行语法与依赖检查，可在所选虚拟环境中执行 `python -m compileall -q analysis.py plot_figures.py tests` 和 `python -m pip check`。[测试源码](../tests/test_analysis.py)
 
-### 身份与发布范围
+## 4. 核心统计结果复核
 
-仓库级作者配置为 studing-endless，邮箱为 257683604+studing-endless@users.noreply.github.com。该身份来自本地 Olist 正式仓库提交 d10c3a4，账号 ID 与 GitHub 连接器返回的 257683604 一致。GitHub 私有邮箱设置页未读取，因此不声称检查了所有已验证邮箱。全局配置未修改，历史 Codex 提交保留。
+### 样本、分配与增量
 
-About Description 和五项 Topics 已通过 GitHub API 更新并回读确认。仓库目前无 LICENSE，未自行选择开源许可证。原始 CSV 的再分发许可仍未确认，读者按来源获取数据。整改及复现命令修正已通过 [PR #1](https://github.com/studing-endless/hillstrom-email-marketing-ab-test/pull/1) 合并到 main，合并提交为 c53973d2175ec6834f901ac733ab468b3df6e473。合并后 Linux CI 为 34 passed、1 skipped，缺少公开 CSV 时跳过全量集成项符合预期。已实际验证的全量环境为 Windows Python 3.13.6，Linux CI 验证合成测试；macOS 以及 Python 3.10、3.11、3.12 的全量运行尚未验证。
+| 项目 | 实际复核结果 |
+| --- | --- |
+| 数据规模 | 64,000 × 12 |
+| 男装 / 女装 / 不发人数 | 21,307 / 21,387 / 21,306 |
+| 男装邮件增量 RPC | +0.769827156 美元/客户 |
+| 女装邮件增量 RPC | +0.424412216 美元/客户 |
+| 1:1:1 SRM | χ²=0.202531250，P=0.903692958 |
+
+SRM 使用真实预期比例和原始人数，未发现明显比例异常。它无法证明随机化与数据记录的每个环节均正确。
+
+### 九项双侧比较
+
+行为差异以百分点计，RPC 差异以美元/客户计。指标内 Holm 针对每项指标的三次比较，九项 Holm 将三指标的九个原始 P 值共同校正。区间为未同时调整的单项 95% 区间。
+
+| 指标 | 前者减后者 | 差异 | 单项 95% CI | 原始 P | 指标内 Holm P | 九项 Holm P |
+| --- | --- | ---: | --- | ---: | ---: | ---: |
+| 访问 | 男装－不发 | 7.6590 | [6.9953, 8.3227] | 5.68517e-112 | 1.70555e-111 | 5.11665e-111 |
+| 访问 | 女装－不发 | 4.5233 | [3.8894, 5.1574] | 3.1824e-44 | 6.36481e-44 | 2.54592e-43 |
+| 访问 | 男装－女装 | 3.1356 | [2.4284, 3.8428] | 3.80217e-18 | 3.80217e-18 | 2.66152e-17 |
+| 购买 | 男装－不发 | 0.6805 | [0.5014, 0.8641] | 1.52322e-13 | 4.56967e-13 | 9.13934e-13 |
+| 购买 | 女装－不发 | 0.3111 | [0.1502, 0.4745] | 0.000157105 | 0.00031421 | 0.000628421 |
+| 购买 | 男装－女装 | 0.3694 | [0.1746, 0.5663] | 0.000205154 | 0.00031421 | 0.000628421 |
+| RPC | 男装－不发 | 0.7698 | [0.4851, 1.0545] | 1.16381e-07 | 3.49144e-07 | 5.81907e-07 |
+| RPC | 女装－不发 | 0.4244 | [0.1690, 0.6799] | 0.0011294 | 0.00225879 | 0.00225879 |
+| RPC | 男装－女装 | 0.3454 | [0.0326, 0.6583] | 0.0304687 | 0.0304687 | 0.0304687 |
+
+比例区间用 Newcombe，RPC 区间用 Welch。九项共同校正后结论保持一致，两邮件直接比较的收入证据相对较弱。原有 3,000 次 RPC Bootstrap 区间依次为 [0.4807, 1.0461]、[0.1877, 0.6902]、[0.0344, 0.6582]，未增加抽样次数。
+
+### 异质性与固定策略评价
+
+| 项目 | 实际复核结果 |
+| --- | --- |
+| 历史品类三方案 HC3 交互 P | 0.141811990 |
+| 历史品类两封邮件 HC3 交互 P | 0.041738011 |
+| 规则 A 验证 RPC | 1.540340151 美元/客户 |
+| 规则 B 验证 RPC | 1.550952170 美元/客户 |
+| B−A / 双侧 Welch P | +0.010612019 / 0.957054219 |
+| B−A 单项 95% CI | [−0.375690200, 0.396914238] |
+| newbie 交互原始 P / 两项 Holm P | 0.051584048 / 0.103168096 |
+| channel 交互原始 P / 两项 Holm P | 0.315287321 / 0.315287321 |
+
+种子 42 保持原训练/验证划分，A 统一选男装，B 仅在仅买过女装群体改选女装。评价使用固定规则与同一验证客户构成。当前证据不足以支持 B 替代 A。历史品类的名义 P 值属于探索结果，不能当作整个项目已统一校正的结论。[检验族与统计口径](methodology.md)
+
+### 图表数值与情景范围
+
+RPC 图完全使用上表的三项收入比较。利润图完全使用主分析的 100,000 人、20%/30%/40% 毛益率和 0.10/0.20 美元单位成本，共 12 项方案情景，展示利润点估计。与图表生成前的正式计算比较，全部结构化主结果及 12 项利润、区间和参数保持一致。
+
+在 30% 假设毛益率下，男装/女装在 0.10 美元成本时的利润点估计为 13,094.81 / 2,732.37 美元；成本升至 0.20 美元时为 3,094.81 / −7,267.63 美元。全部情景和不确定性解释见[完整报告](analysis-report.md)。[RPC 图](../figures/rpc_uplift_ci.png) · [利润图](../figures/profit_sensitivity.png) · [绘图源码](../plot_figures.py)
+
+## 5. 复现范围与局限
+
+历史实验来自 2008 年既有购买客户，只有两周观察窗口。随机化支持该实验条件下的平均分配效果，未来客户、长期响应和真实财务条件仍需重新评价。利润为假设情景，并未测量企业实际利润。
+
+此前已观察全量数据，后续训练/验证只能视为探索性的内部评价。消费零值多、右尾明显，单元格内 Bootstrap 仅反映当前样本经验分布。新增敏感性区间为单项区间，未对全部探索作项目级同时覆盖调整。[统计质量报告](statistical-quality.md)
+
+公开仓库保留代码、报告、测试和由汇总结果生成的图片。原始 CSV 需另行获取；代码许可和数据再分发权限分别处理。合成 CI 的通过与实机全量复现分别报告。

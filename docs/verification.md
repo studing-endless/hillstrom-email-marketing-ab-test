@@ -49,7 +49,7 @@ python3.13 -m venv .venv
 
 本地原有 35 项测试全部通过，含 64,000 行 CSV 的完整集成复现。展示版另增 2 项测试，分别核对利润参数与全部情景值，以及绘图输入、PNG 格式、尺寸、DPI 和中文缺字警告，共 37 项通过。语法检查与依赖一致性检查也已通过。
 
-公开 CI 不含 CSV，原有测试结果为 34 passed、1 skipped；加入两项展示测试后预期为 36 passed、1 skipped。唯一跳过项是需要原始 CSV 的全量集成验证，其跳过原因由测试明确输出。最终执行结果可在 [GitHub Actions](https://github.com/studing-endless/hillstrom-email-marketing-ab-test/actions/workflows/tests.yml) 查看。合成样本验证公式及程序路径，无法替代原始实验数据的复现。
+公开 Linux CI 已实际通过 36 项测试，1 项预期跳过，包含两项展示测试。唯一跳过项是需要原始 CSV 的全量集成验证，其跳过原因由测试明确输出。最终执行结果可在 [GitHub Actions](https://github.com/studing-endless/hillstrom-email-marketing-ab-test/actions/workflows/tests.yml) 查看。合成样本验证公式及程序路径，无法替代原始实验数据的复现。
 
 如需单独运行语法与依赖检查，可在所选虚拟环境中执行 `python -m compileall -q analysis.py plot_figures.py tests` 和 `python -m pip check`。[测试源码](../tests/test_analysis.py)
 

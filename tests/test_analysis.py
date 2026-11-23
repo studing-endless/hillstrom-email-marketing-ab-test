@@ -240,3 +240,38 @@ def test_training_selects_different_actions(data):
     frozen = strategy_b.copy()
     a.evaluate_policies(data, strategy_a, strategy_b)
     pd.testing.assert_series_equal(strategy_b, frozen)
+
+
+def test_profit_scenarios_existing_parameters(data):
+    metrics, tests = a.business_metrics(data), a.comparisons(data)
+    scenarios = a.profit_scenarios(metrics, tests)
+    assert len(scenarios) == 12
+    assert set(scenarios.margin) == {.2, .3, .4}
+    assert set(scenarios.cost) == {.1, .2}
+    # 合成数据 RPC 为男装 3、女装 4.5、不发 6，独立核对全部情景值。
+    for row in scenarios.itertuples():
+        uplift = {a.ARMS[0]: -3., a.ARMS[1]: -1.5}[row.arm]
+        assert row.profit == pytest.approx((uplift * row.margin - row.cost) * 100000)
+        assert row.per_customer == pytest.approx(row.profit / 100000)
+
+
+def test_figure_inputs_and_png_output(data, tmp_path):
+    from PIL import Image
+    from plot_figures import generate_figures
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        table, scenarios, font = generate_figures(data, tmp_path)
+    pd.testing.assert_frame_equal(table, a.comparisons(data))
+    pd.testing.assert_frame_equal(scenarios, a.profit_scenarios(a.business_metrics(data), table))
+    assert table.loc[table.metric == "spend", "diff"].to_list() == [-3., -1.5, -1.5]
+    assert font
+    for name, size in [("rpc_uplift_ci.png", (2200, 900)),
+                       ("profit_sensitivity.png", (2000, 1000))]:
+        path = tmp_path / name
+        assert path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+        with Image.open(path) as image:
+            assert image.format == "PNG"
+            assert image.size == size
+            assert image.info["dpi"] == pytest.approx((200, 200), abs=.01)
+            image.verify()

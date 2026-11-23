@@ -236,6 +236,22 @@ def bootstrap_interactions(df, repetitions=3000, seed=42):
     return pd.DataFrame(rows)
 
 
+def profit_scenarios(metrics, tests):
+    """原第四阶段的 10 万客户、三档毛益与两档成本假设情景。"""
+    scenarios = []
+    for arm in ARMS[:2]:
+        uplift = metrics.loc[arm, "uplift"]
+        ci = tests.loc[(tests.metric == "spend") & (tests.comparison == f"{arm} vs No E-Mail")].iloc[0]
+        for margin in (0.2, 0.3, 0.4):
+            for cost in (0.1, 0.2):
+                scenarios.append(dict(arm=arm, margin=margin, cost=cost,
+                                      per_customer=uplift * margin - cost,
+                                      profit=(uplift * margin - cost) * 100000,
+                                      low=(ci.low * margin - cost) * 100000,
+                                      high=(ci.high * margin - cost) * 100000))
+    return pd.DataFrame(scenarios)
+
+
 def run_analysis(df, repetitions=3000):
     validate_data(df)
     data = df.copy()
@@ -256,19 +272,10 @@ def run_analysis(df, repetitions=3000):
     bootstrap = bootstrap_rpc(data, repetitions)
     print(bootstrap.to_string(index=False))
     print("\n阶段 4｜10 万客户假设情景；成本、毛益均为假设")
-    scenarios = []
     for arm in ARMS[:2]:
         uplift = metrics.loc[arm, "uplift"]
-        ci = tests.loc[(tests.metric == "spend") & (tests.comparison == f"{arm} vs No E-Mail")].iloc[0]
         print(arm, "增量销售额", uplift * 100000, "30% 毛益盈亏平衡成本", uplift * 0.3)
-        for margin in (0.2, 0.3, 0.4):
-            for cost in (0.1, 0.2):
-                scenarios.append(dict(arm=arm, margin=margin, cost=cost,
-                                      per_customer=uplift * margin - cost,
-                                      profit=(uplift * margin - cost) * 100000,
-                                      low=(ci.low * margin - cost) * 100000,
-                                      high=(ci.high * margin - cost) * 100000))
-    print(pd.DataFrame(scenarios).to_string(index=False))
+    print(profit_scenarios(metrics, tests).to_string(index=False))
     print("\n阶段 5｜历史品类与探索性策略；5.5 新老客户、历史渠道")
     interactions = {}
     for feature in ("purchase_group", "newbie", "channel"):

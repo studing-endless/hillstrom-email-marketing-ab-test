@@ -1,4 +1,7 @@
 # Hillstrom 邮件营销随机实验
+
+[![Python checks](https://github.com/studing-endless/hillstrom-email-marketing-ab-test/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/studing-endless/hillstrom-email-marketing-ab-test/actions/workflows/tests.yml)
+
 *Hillstrom Email Marketing A/B/n Experiment*
 
 发不发邮件、发哪封、给谁发，是零售商要作出的三个决定。即使不发邮件，有些客户也会回来购买。要判断营销预算是否值得投入，需要先区分自然购买和邮件带来的增量。本项目使用 Kevin Hillstrom 公开的 64,000 名既有客户随机实验，比较男装邮件、女装邮件和不发邮件在随后两周带来的访问、购买与销售差异。[原始挑战](https://blog.minethatdata.com/2008/03/minethatdata-e-mail-analytics-and-data.html)
@@ -7,7 +10,7 @@
 
 分析先检查随机分配与客户基线，再从访问率追踪到购买率及每名客户收入（RPC），用区间和多重比较评估证据，最后将增量收入换算为成本情景，并比较统一与分群投放的价值。
 
-两封邮件都显示正向收入增量。男装邮件应作为新随机试点的优先候选，真实投放还需结合当前客户、贡献毛益和营销成本判断。历史品类存在响应差异线索，但分群规则的内部评价尚不足以支持替换统一方案。
+优先把统一男装邮件作为新随机试点候选，保留不发本次邮件的对照组，验证当前客户的真实增量。是否扩大投放取决于实际成本、贡献毛益、统计证据及退订等风险护栏。复杂分群暂缺可靠的额外收益证据。[营销试点与推广决策](docs/analysis-report.md#营销试点与推广决策)
 
 ## 邮件增加了多少收入
 
@@ -37,7 +40,7 @@
 
 用同一训练集分别选出统一发男装的规则 A 和按历史品类投放的规则 B，再用验证集原有的随机分组评价固定规则。B 只给仅买过女装的人换邮件，整体估计多 0.0106 美元/客户，Welch P = 0.9571，单项 95% 区间为 [−0.3757, 0.3969]。
 
-这次内部评价缺少用 B 替代 A 的可靠证据。先看全量数据再拆分的过程具有探索性质，未来需要固定规则后用新数据评价。新老客户及历史渠道的交互结果也保留在报告中。
+历史品类直接关联邮件内容，已用 mens、womens 构建三个互斥群体，并检验品类、新老身份及渠道的响应差异。部分异质性线索尚未转化成规则收益证据。继续细分可能让每个单元格的实际购买样本更少，增加估计不确定性、规则选择风险和运营复杂度，因此暂不推荐复杂个性化。P = 0.9571 既不能证明过拟合，也不能证明两规则等效；当前评价具有探索性质，后续应在新数据中比较事先固定的候选规则。
 
 **[阅读完整分析报告](docs/analysis-report.md)**，查看五阶段及第 5.5 节的完整业务推理与证据。[统计方法](docs/methodology.md) · [字段字典](docs/data-dictionary.md) · [统计质量与敏感性](docs/statistical-quality.md)
 
